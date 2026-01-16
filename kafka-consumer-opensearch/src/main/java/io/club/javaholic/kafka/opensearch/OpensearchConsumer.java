@@ -12,8 +12,10 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.opensearch.action.bulk.BulkRequest;
+import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.client.RequestOptions;
 import org.opensearch.client.RestClient;
@@ -94,48 +96,70 @@ public class OpensearchConsumer {
 
             //subbscribe consumer
             kafkaConsumer.subscribe(Collections.singleton("wikimedia.recentchange"));
-
+            try {
             while (true) {
-                ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(3000));
 
-                int recordCount = records.count();
-                log.info("Received " + recordCount + " record(s)");
+                    ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(3000));
 
-                BulkRequest bulkRequest = new BulkRequest();
+                    int recordCount = records.count();
+                    log.info("Received " + recordCount + " record(s)");
 
-                for (ConsumerRecord<String, String> record : records) {
+                    BulkRequest bulkRequest = new BulkRequest();
 
-                    // send the record into OpenSearch
+                    for (ConsumerRecord<String, String> record : records) {
 
-                    // strategy 1
-                    // define an ID using Kafka Record coordinates
+                        // send the record into OpenSearch
+
+                        // strategy 1
+                        // define an ID using Kafka Record coordinates
 //                    String id = record.topic() + "_" + record.partition() + "_" + record.offset();
 
-                    try {
-                        // strategy 2
-                        // we extract the ID from the JSON value
-                        String id = extractId(record.value());
+                        try {
+                            // strategy 2
+                            // we extract the ID from the JSON value
+                            String id = extractId(record.value());
 
-                        IndexRequest indexRequest = new IndexRequest("wikimedia")
-                                .source(record.value(), XContentType.JSON)
-                                .id(id);
+                            IndexRequest indexRequest = new IndexRequest("wikimedia")
+                                    .source(record.value(), XContentType.JSON)
+                                    .id(id);
 
 //                        IndexResponse response = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
 
-                        bulkRequest.add(indexRequest);
+                            bulkRequest.add(indexRequest);
 
 //                        log.info(response.getId());
-                    } catch (Exception e) {
+                        } catch (Exception e) {
 
+                        }
                     }
-                }
-            }
+                    if (bulkRequest.numberOfActions() > 0) {
+                        BulkResponse bulkResponse = opensearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                        log.info("Inserted: " + bulkResponse.getItems().length + " records.");
+
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                        kafkaConsumer.commitAsync();
+                        log.info("commited");
+                    }
+
         }
 
-
-        //main code logic
-
+            } catch (
+                    WakeupException e) {
+                log.error("Consumer is starting to shutdown");
+            } catch (Exception e) {
+                log.error("Unexpected exception in consumer", e);
+            } finally {
+                kafkaConsumer.close();
+                opensearchClient.close();
+                log.info("consumer gracefully shut down");
+            }
+        }
         //close resources
+
     }
 
     private static KafkaConsumer<String, String> createKafkaConsumer() {
